@@ -4,7 +4,7 @@
 import cgi
 #import cgitb; cgitb.enable()  # for troubleshooting
 import re, sqlite3, collections
-import sys,codecs 
+import sys
 import operator
 #sys.stdout = codecs.getwriter('utf8')(sys.stdout)
 from collections import defaultdict as dd
@@ -29,10 +29,10 @@ wndb = "../db/wn-ntumc.db"
 
 # 2014-06-12 [Tuan Anh]
 def jilog(msg):
-    sys.stderr.write((u"%s\n" % unicode(msg)).encode("ascii","ignore"))
+    sys.stderr.write((u"%s\n" % msg).encode("ascii", "ignore"))
     try:
-        with codecs.open("../log/ntumc.txt", "a", encoding='utf-8') as logfile:
-            logfile.write(u"%s\n" % unicode(msg))
+        with open("../log/ntumc.txt", "a", encoding='utf-8') as logfile:
+            logfile.write(u"%s\n" % msg)
     except Exception as ex:
         sys.stderr.write(str(ex))
         pass
@@ -52,7 +52,7 @@ class Timer:
     def __str__(self):
         return "Execution time: %.2f sec(s)" % (self.end_time - self.start_time) 
     def log(self, task_note = ''):
-        jilog(u"%s - Note=[%s]\n" % (self, unicode(task_note)))
+        jilog(u"%s - Note=[%s]\n" % (self, task_note))
         return self
 
 #############################################################
@@ -197,10 +197,14 @@ def tbox(sss, cid, wp, tag, ntag, com):
   <input type='radio' name='cid_%s' title='%s' value='%s'""" % (cid, tv, tk)
         if (tk == tag):
             box += " CHECKED "
-        show_text = mtags_short[tk] if mtags_short.has_key(tk) else tk
+        show_text = mtags_short[tk] if tk in mtags_short else tk
         box += " /><span title='%s'>%s</span></span>\n" % (tv, show_text)
     tagv=''
-    if unicode(tag) != unicode(ntag):
+    # TODO(Wilson): Since Py3, all strings are natively stored as Unicode. We
+    # still have to verify exactly how Python's under-the-hood implementation
+    # for Unicode comparison works; e.g. are they compliant with canonical
+    # equivalence? See https://en.wikipedia.org/wiki/Unicode_equivalence
+    if tag != ntag:
         tagv=ntag
     if tagv:
         box += """<span style='background-color: #dddddd;white-space: nowrap;border: 1px solid black'>%s</span>""" % tagv
