@@ -1,9 +1,16 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-import Cookie, os, sys, codecs
-from ntumc_util import *
-from lang_data_toolkit import *
+import codecs
+import os
+import sys
+
+import Cookie  # Probably pip install cookies
+
+from ntumc_util import jilog  # debug logging function
+from ntumc_util import logincgi, taglcgi, tagwcgi, valid_usernames # constants
+from lang_data_toolkit import omwlang
+
 
 class HTML:
 
@@ -55,7 +62,7 @@ class HTML:
         if cookie_text:
             print(cookie_text)
         print(u"""Content-type: text/html; charset=utf-8\n""")
-        print template.render(data)
+        print(template.render(data))
 
         
 
