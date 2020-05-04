@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/python
 # -*- coding: utf-8 -*-
 ###
 ### This is a simple cgi-script for showing sentences in the corpus
@@ -7,25 +7,27 @@
 ### This is released under the CC BY license
 ### (http://creativecommons.org/licenses/by/3.0/)
 ### bugfixes and enhancements gratefuly received
-
 import cgi
-import cgitb; cgitb.enable()  # for troubleshooting
-import re, sqlite3, collections
-import sys,codecs, os 
-import operator
-sys.stdout = codecs.getwriter('utf8')(sys.stdout)
+#import cgitb; cgitb.enable()  # for troubleshooting
+import codecs
 from collections import defaultdict as dd
+import os
+import sys
+
+import sqlite3
+
+# sys.stdout = codecs.getwriter('utf8')(sys.stdout)
 
 showsentcgi = "show-sent.cgi"
 
 form = cgi.FieldStorage()
 corpus = form.getfirst("corpus", "cmn")
-sid = int(form.getfirst("sid", 1))
+target_sid = int(form.getfirst("sid", 1))
 window = int(form.getfirst("window", 5))
 if window > 200:
     window = 200
-lemma = form.getfirst("lemma", "")
-lemma = lemma.strip().decode('utf-8')
+lemma = form.getfirst("lemma", "")  # Space-delimited string of lemmas to highlight
+lemma = codecs.encode(lemma.strip(), 'utf8')
 
 corpus2 = 'eng'
 linkdb = 'cmn-eng'
@@ -33,41 +35,49 @@ linkdb = 'cmn-eng'
 con = sqlite3.connect("../db/%s.db" % corpus)
 c = con.cursor()
 ##
-## get monolingual stuff
+## Get monolingual stuff
 ##
 
-ss = dd(lambda: dd(unicode))
-c.execute("select sid, docID, sent from sent where sid >= ? and sid <= ?", 
-          (sid - window, sid + window))
-sss =set() ### all the synsets
-for (s, d, sent) in c:
-    sss.add(s)
+# Extract all sentences from db into dict of {docID: {sid: sent}}
+# (Wilson) ss: a dict of sentences indexed by [docID][sentenceID]
+# (Wilson) sss: a set of all sentence IDs
+ss = dd(lambda: dd(str))
+sss = set() ### all the synsets
+c.execute('SELECT sid, docID, sent FROM sent WHERE sid >= ? AND sid <= ?',
+          (target_sid - window, target_sid + window))
+for (sid, docid, sent) in c:
+    sss.add(sid)
     if lemma:
-        for l in lemma.split():
-            sent=sent.replace(l,"<font color='green'>%s</font>" % l)
-    ss[d][s]=sent
+        for lem in lemma.split():
+            sent = sent.replace(lem, '<font color="green">%s</font>' % lem)
+    ss[docid][sid] = sent
 
-query="""select corpusID, docid, doc, title, url from doc  
-        where docid in (%s)""" % ','.join('?'*len(ss.keys()))
-c.execute(query, ss.keys())
+# (Wilson) Extract documents containing those sentences into dict of
+#   {corpusID: docID: (url, title, docname)}
+query = """SELECT corpusID, docid, doc, title, url
+           FROM doc
+           WHERE docid IN (%s)""" % ','.join('?' for docid in ss.keys())
+c.execute(query, list(ss.keys()))
 
-doc= dd(lambda: dd(list))
+doc = dd(lambda: dd(tuple))
 for (corpusID, docid, docname, title, url) in c:
+    corpusID, docid = int(corpusID), int(docid)
     if url:
         if not url.startswith('http://'):
-            url = 'http://' +url
+            url = 'http://' + url
     else:
-        url=''
-    doc[int(corpusID)][int(docid)] = (url, title, docname)
+        url = ''
+    doc[corpusID][docid] = (url, title, docname)
 
-query="""select corpusID, corpus, title from corpus 
-         where corpusID in (%s)""" % ','.join('?'*len(doc.keys()))
-c.execute(query, doc.keys())
-
+# (Wilson) Extract subcorpora containing those documents into dict of
+#   {corpusID: (title, corpusName)}
+query = """SELECT corpusID, corpus, title
+           FROM corpus
+           WHERE corpusID in (%s)""" % ','.join('?' for corpusID in doc.keys())
+c.execute(query, list(doc.keys()))
 corp = dd(list)
 for (corpusID, corpus, title) in c:
-    #print corpusID, corpus, title
-    corp[int(corpusID)]=(title, corpus)
+    corp[int(corpusID)] = (title, corpus)
 
 ###
 ### get links  ### FIXME -- how to tell which direction programatically?
@@ -76,67 +86,114 @@ links = dd(set)
 ttt = dict()
 if os.path.isfile("../db/%s.db" % linkdb):
     lcon = sqlite3.connect("../db/%s.db" % linkdb)
-    lc = lcon.cursor() 
-    query="""select fsid, tsid from slink  
-        where fsid in (%s)""" % ','.join('?'*len(sss))
+    lc = lcon.cursor()
+    # (Wilson) fsid, tsid means from/to sid... I think
+    query = """SELECT fsid, tsid 
+               FROM slink
+               WHERE fsid IN (%s)""" % ','.join('?' for sid in sss)
     lc.execute(query, list(sss))
     for (fsid, tsid) in lc:
-        links[int(fsid)].add(int(tsid))
-        ttt[tsid]=''
+        fsid, tsid = int(fsid), int(tsid)
+        links[fsid].add(tsid)
+        ttt[tsid] = ''
 ##
 ## Get translations
 ##
 if os.path.isfile("../db/%s.db" % corpus2):
     tcon = sqlite3.connect("../db/%s.db" % corpus2)
     tc = tcon.cursor()
-    query="""select sid, sent from sent
-        where sid in (%s)""" % ','.join('?'*len(ttt.keys()))
-    tc.execute(query, ttt.keys())
-    for (sd, sent) in tc:
-        ttt[sd]=sent
+    query = """SELECT sid, sent 
+               FROM sent
+               WHERE sid IN (%s)""" % ','.join('?' for tsid in ttt)
+    tc.execute(query, list(ttt.keys()))
+    for (sid, sent) in tc:
+        ttt[sid] = sent
 
 
 # 2014-07-14 [Tuan Anh]
 # Add jQuery support & alternate sentence colors
-print u"""Content-type: text/html; charset=utf-8\n
+# FIXME(Wilson) According to MDN, using <meta http-equiv="content-language">
+#   is considered Bad Practice. Should we switch to <html lang="foo">?
+# https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Content-Language
+print('Content-type: text/html; charset=utf-8')
+print()
+print("""
 <html>
- <head>
-   <meta http-equiv='Content-Type' content='text/html; charset=utf-8'>
-   <meta http-equiv='content-language' content='zh'>
-   <title>%s: %s ± %s</title>
-   <script src='../jquery.js' language='javascript'></script>
-   <script src='../js/show-sent.js' language='javascript'></script>
-   <script>
+  <head>
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+    <meta http-equiv="content-language" content="zh">
+    <title>{corpus_name}: {sid} ± {window}</title>
+    <script src="../jquery.js" language="javascript"></script>
+    <script src="../js/show-sent.js" language="javascript"></script>
+    <script>
       $( document ).ready(page_init);
-   </script>
-</head>""" % (corpus, sid, window)
+    </script>
+  </head>
+  <body>
+""".format(
+    corpus_name=corpus,
+    sid=target_sid,
+    window=window
+))
 
-print """<body>"""
 
 # 2014-07-14 [Tuan Anh]
 # Show/hide translation
+per_corpus = """
+  <h2>{c_title} ({c_name})</h2>
+  <div>
+    <button style="float:right;" type="button" id="btnTran" name="btnTran">
+      Toggle Translation
+    </button>
+  </div>
+"""
 
+per_document = """
+  <h3><a href="{d_url}">{d_title} ({d_name})</a></h3>
+  <p>
+"""
 
+per_sentence = """
+  <div style="background-color: {row_col}">
+    <span{highlight}>{sid}</span>
+    &nbsp;&nbsp;&nbsp;&nbsp;{sent}
+    {translations}
+  </div>
+"""
 
-for c in sorted(corp.keys()):
-    print u"<h2>%s (%s)</h2>" % corp[c]
-    print "<div><button  style='float:right;' type='button' id='btnTran' name='btnTran'>Toggle Translation</button></div>"
-    for d in sorted(doc[c].keys()):
-        print u"<h3><a href='%s'>%s (%s)</a></h3>" % doc[c][d]
-        print "<p>" 
-        roll_color_alt = ['#ffffff', '#fafafa']
-        roll_color = 0
-        for s in sorted(ss[d].keys()):
-            roll_color = 0 if roll_color == 1 else 1
-            print "<div style='background-color: %s'>" % roll_color_alt[roll_color]
-            if s ==sid:
-                print "<span style='color:red'>%d</span>&nbsp;&nbsp;&nbsp;&nbsp;%s" % (s, 
-                                                                            ss[d][s])
-            else:
-                print "%s&nbsp;&nbsp;&nbsp;&nbsp;%s" % (s, ss[d][s])
-            for t in links[s]:
-                print "<br/><font color='#505050' class='trans'>%s&nbsp;&nbsp;&nbsp;&nbsp;%s</font>" % (t, 
-                                                                                      ttt[t]) 
-            print "</div>"
+per_translation = """
+    <br/>
+    <font color="#505050" class="trans">
+      {t_sid}&nbsp;&nbsp;&nbsp;&nbsp;{translated}
+    </font>
+"""
 
-print """</body></html>"""
+for corpid in sorted(corp.keys()):
+    c_title, c_name = corp[corpid]
+    print(per_corpus.format(**locals()))
+
+    documents = doc[corpid]
+    sentences = ss[corpid]
+
+    for docid in sorted(doc[corpid].keys()):
+        d_url, d_title, d_name = doc[corpid][docid]
+        print(per_document.format(**locals()))
+
+        row_cols = ['#ffffff', '#fafafa']
+        for i, sid in enumerate(sorted(ss[docid].keys())):
+            sent = ss[docid][sid]
+
+            row_col = row_cols[i % len(row_cols)]
+            highlight = ' style="color:red"' if sid == target_sid else ''
+
+            translations = ''.join(
+                per_translation.format(t_sid=t_sid, translated=ttt[t_sid])
+                for t_sid in links[sid]
+            )
+
+            print(per_sentence.format(**locals()))
+
+print("""
+  </body>
+</html>
+""")
