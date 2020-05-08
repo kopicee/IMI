@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 ###
 ### This is a simple cgi-script for showing sentences in the corpus
