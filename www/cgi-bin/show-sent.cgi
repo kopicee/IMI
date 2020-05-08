@@ -16,98 +16,121 @@ import sys
 
 import sqlite3
 
+
+def placeholders_for(iterable, symbol='?'):
+    """Make SQLite placeholders for data; [1, 2, 3] -> '?,?,?'"""
+    return ','.join(symbol for x in iterable)
+
+
 # sys.stdout = codecs.getwriter('utf8')(sys.stdout)
 
 showsentcgi = "show-sent.cgi"
 
 form = cgi.FieldStorage()
+
+# Corpus to connect to:
 corpus = form.getfirst("corpus", "cmn")
-target_sid = int(form.getfirst("sid", 1))
+
+# Sentence ID to look up
+target_sid = int(form.getfirst("sid", 101510))
+
+# Number of sentences preceding and following target_sid to show for context
 window = int(form.getfirst("window", 5))
 if window > 200:
     window = 200
-lemma = form.getfirst("lemma", "")  # Space-delimited string of lemmas to highlight
-lemma = codecs.encode(lemma.strip(), 'utf8')
 
-corpus2 = 'eng'
-linkdb = 'cmn-eng'
+# Space-delimited string of lemmas to highlight
+lemma = form.getfirst("lemma", "车")
+#lemma = codecs.encode(lemma.strip(), 'utf8')
+lemma = lemma.strip()
 
-con = sqlite3.connect("../db/%s.db" % corpus)
-c = con.cursor()
-##
-## Get monolingual stuff
-##
+# Databases to fetch aligned translated sentences from
+linkdb = 'cmn-eng'  # 1:1 linked sentenceids from Mandarin to English
+corpus2 = 'eng'  # English db to fetch linked sentenceids
 
-# Extract all sentences from db into dict of {docID: {sid: sent}}
-# (Wilson) ss: a dict of sentences indexed by [docID][sentenceID]
+###
+### Get monolingual stuff
+###
+# (Wilson) ss: a dict of sentences {docID: {sentenceID: sentence}}
 # (Wilson) sss: a set of all sentence IDs
 ss = dd(lambda: dd(str))
 sss = set() ### all the synsets
+
+# FIXME(Wilson): Constrain instead of letting user specify filename to connect
+con = sqlite3.connect("../db/%s.db" % corpus)
+c = con.cursor()
+
 c.execute('SELECT sid, docID, sent FROM sent WHERE sid >= ? AND sid <= ?',
           (target_sid - window, target_sid + window))
 for (sid, docid, sent) in c:
     sss.add(sid)
-    if lemma:
-        for lem in lemma.split():
-            sent = sent.replace(lem, '<font color="green">%s</font>' % lem)
     ss[docid][sid] = sent
 
 # (Wilson) Extract documents containing those sentences into dict of
-#   {corpusID: docID: (url, title, docname)}
+#   doc = {corpusID: docID: (url, title, docname)}
 query = """SELECT corpusID, docid, doc, title, url
            FROM doc
-           WHERE docid IN (%s)""" % ','.join('?' for docid in ss.keys())
+           WHERE docid IN (%s)""" % placeholders_for(ss)
 c.execute(query, list(ss.keys()))
 
 doc = dd(lambda: dd(tuple))
 for (corpusID, docid, docname, title, url) in c:
     corpusID, docid = int(corpusID), int(docid)
     if url:
-        if not url.startswith('http://'):
+        if not url.startswith('http://') or url.startswith('https://'):
             url = 'http://' + url
     else:
         url = ''
     doc[corpusID][docid] = (url, title, docname)
 
 # (Wilson) Extract subcorpora containing those documents into dict of
-#   {corpusID: (title, corpusName)}
+#   corp = {corpusID: (title, corpusName)}
 query = """SELECT corpusID, corpus, title
            FROM corpus
-           WHERE corpusID in (%s)""" % ','.join('?' for corpusID in doc.keys())
+           WHERE corpusID in (%s)""" % placeholders_for(doc)
 c.execute(query, list(doc.keys()))
-corp = dd(list)
+
+corp = dd(tuple)
 for (corpusID, corpus, title) in c:
     corp[int(corpusID)] = (title, corpus)
 
-###
-### get links  ### FIXME -- how to tell which direction programatically?
-###
-links = dd(set)
-ttt = dict()
+### (Wilson) Extract translations.
+### First, fetch sentenceids in the target lang (tsids) linked/aligned to the
+### source sentenceids of interest (fsids). Next, querying the target lang's db
+### to resolve tsids -> sentences
+##
+## get links from fsids to tsids  ### FIXME -- how to tell which direction programatically?
+##
+links = dd(set)  # {fsid: set(tsids...)}
+ttt = dd(str)  # {tsid: tgtSentence}
+
 if os.path.isfile("../db/%s.db" % linkdb):
     lcon = sqlite3.connect("../db/%s.db" % linkdb)
     lc = lcon.cursor()
+
     # (Wilson) fsid, tsid means from/to sid... I think
-    query = """SELECT fsid, tsid 
+    query = """SELECT fsid, tsid
                FROM slink
-               WHERE fsid IN (%s)""" % ','.join('?' for sid in sss)
+               WHERE fsid IN (%s)""" % placeholders_for(sss)
     lc.execute(query, list(sss))
+
     for (fsid, tsid) in lc:
         fsid, tsid = int(fsid), int(tsid)
         links[fsid].add(tsid)
         ttt[tsid] = ''
+
 ##
-## Get translations
+## Get translations from tsids
 ##
 if os.path.isfile("../db/%s.db" % corpus2):
     tcon = sqlite3.connect("../db/%s.db" % corpus2)
     tc = tcon.cursor()
-    query = """SELECT sid, sent 
+    query = """SELECT sid, sent
                FROM sent
-               WHERE sid IN (%s)""" % ','.join('?' for tsid in ttt)
+               WHERE sid IN (%s)""" % placeholders_for(ttt)
     tc.execute(query, list(ttt.keys()))
-    for (sid, sent) in tc:
-        ttt[sid] = sent
+    for (tsid, sent) in tc:
+        ttt[tsid] = sent
 
 
 # 2014-07-14 [Tuan Anh]
@@ -139,7 +162,7 @@ print("""
 
 # 2014-07-14 [Tuan Anh]
 # Show/hide translation
-per_corpus = """
+PER_CORPUS = """
   <h2>{c_title} ({c_name})</h2>
   <div>
     <button style="float:right;" type="button" id="btnTran" name="btnTran">
@@ -148,20 +171,20 @@ per_corpus = """
   </div>
 """
 
-per_document = """
+PER_DOCUMENT = """
   <h3><a href="{d_url}">{d_title} ({d_name})</a></h3>
   <p>
 """
 
-per_sentence = """
-  <div style="background-color: {row_col}">
+PER_SENTENCE = """
+  <div style="background-color: {row_bgcol}">
     <span{highlight}>{sid}</span>
     &nbsp;&nbsp;&nbsp;&nbsp;{sent}
     {translations}
   </div>
 """
 
-per_translation = """
+PER_TRANSLATION = """
     <br/>
     <font color="#505050" class="trans">
       {t_sid}&nbsp;&nbsp;&nbsp;&nbsp;{translated}
@@ -169,31 +192,50 @@ per_translation = """
 """
 
 for corpid in sorted(corp.keys()):
+    # Print header for each corpus in query result
     c_title, c_name = corp[corpid]
-    print(per_corpus.format(**locals()))
+    print(PER_CORPUS.format(c_title=c_title, c_name=c_name))
 
     documents = doc[corpid]
-    sentences = ss[corpid]
 
-    for docid in sorted(doc[corpid].keys()):
-        d_url, d_title, d_name = doc[corpid][docid]
-        print(per_document.format(**locals()))
+    for docid in sorted(documents.keys()):
+        # Print header for each document
+        d_url, d_title, d_name = documents[docid]
+        print(PER_DOCUMENT.format(d_url=d_url, d_title=d_title, d_name=d_name))
 
-        row_cols = ['#ffffff', '#fafafa']
-        for i, sid in enumerate(sorted(ss[docid].keys())):
-            sent = ss[docid][sid]
+        # Print sentences from each document
+        sentences = ss[docid]
+        row_bgcols = ['#ffffff', '#fafafa']
+        for i, sid in enumerate(sorted(sentences.keys())):
+            sent = sentences[sid]
 
-            row_col = row_cols[i % len(row_cols)]
+            # Highlight lemmas if any were specified by user
+            if lemma:
+                for lem in lemma.split():
+                    hilite = f'<span style="background: lightgreen">{lem}</span>'
+                    sent = sent.replace(lem, hilite)
+
+            # Highlight sentence if sentence id was specified by user
             highlight = ' style="color:red"' if sid == target_sid else ''
 
+            # Background colour of the row; modulo works for any list length
+            row_bgcol = row_bgcols[i % len(row_bgcols)]
+
             translations = ''.join(
-                per_translation.format(t_sid=t_sid, translated=ttt[t_sid])
+                PER_TRANSLATION.format(t_sid=t_sid, translated=ttt[t_sid])
                 for t_sid in links[sid]
             )
 
-            print(per_sentence.format(**locals()))
+            print(PER_SENTENCE.format(row_bgcol=row_bgcol,
+                                      highlight=highlight,
+                                      sid=sid,
+                                      sent=sent,
+                                      translations=translations))
 
 print("""
   </body>
 </html>
 """)
+
+
+# FIXME(Wilson): Close i/o and connections?
