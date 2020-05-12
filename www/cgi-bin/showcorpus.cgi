@@ -6,14 +6,19 @@
 # There seems to be a bug about ';' in the URI. 
 # Our server is accepting any kind of punctuation but ';' or " ' "
 # For now, I'm just printing nothing about these in wordviewmode.
-
 ######################################################################
+
+"""
+TODO:
+- Strongly recommend a whitelist check for `searchlang` values since it's used 
+  to match db files on disk and also goes into a <script> tag (super taboo!)
+"""
 
 import cgi, urllib
 import cgitb; cgitb.enable()  # for troubleshooting
 from os import environ  # for cookies
 import re, sqlite3, collections
-from collections import defaultdict as dd
+from collections import defaultdict, namedtuple, OrderedDict
 
 import datetime
 import sys, codecs
@@ -27,7 +32,7 @@ sys.setdefaultencoding('utf8')
 
 
 # create the error log for the cgi errors
-errlog = codecs.open('cgi_err.log', 'w+', "utf-8")
+errlog = codecs.open('cgi_err.log', 'w+', 'utf-8')
 errlog.write("LAST SEARCH LOG:\n")
 
 
@@ -36,14 +41,22 @@ ver = "0.1"
 url = "http://compling.hss.ntu.edu.sg/"
 
 
+dd = defaultdict
+
+
+def placeholders_for(iterable, symbol='?'):
+    """Make SQLite placeholders for data; [1, 2, 3] -> '?,?,?'"""
+    return ','.join(symbol for x in iterable)
+
+
 form = cgi.FieldStorage()
 
-mode = cgi.escape(form.getfirst('mode',''))
-postag = cgi.escape(form.getfirst("postag",'')) # FOR WORDVIEW
+mode = cgi.escape(form.getfirst('mode', ''))
+postag = cgi.escape(form.getfirst('postag', '')) # FOR WORDVIEW
 # wordtag = form.getlist("wordtag[]") # FOR WORDVIEW
-wordtag = [cgi.escape(t) for t in form.getlist("wordtag[]")]
+wordtag = [cgi.escape(t) for t in form.getlist('wordtag[]')]
 # wordclemma = form.getlist("wordclemma[]") # FOR WORDVIEW
-wordclemma = [cgi.escape(c) for c in form.getlist("wordclemma[]")]
+wordclemma = [cgi.escape(c) for c in form.getlist('wordclemma[]')]
 
 ################################################################################
 # LANGUAGE CHOICES: it allows the choice of a main
@@ -52,46 +65,45 @@ wordclemma = [cgi.escape(c) for c in form.getlist("wordclemma[]")]
 # The same language as the search language cannot
 # be chosen as a "see also language"
 ################################################################################
-searchlang = cgi.escape(form.getfirst("searchlang", "eng"))
+searchlang = cgi.escape(form.getfirst('searchlang', 'eng'))
 # langs2 = form.getlist("langs2")
-langs2 = [cgi.escape(l) for l in form.getlist("langs2")]
+langs2 = [cgi.escape(l) for l in form.getlist('langs2')]
 if searchlang in langs2:
     langs2.remove(searchlang)
 
 
 # senti = form.getlist("senti[]") # receives either 'mlsenticon', 'sentiwn', both or none! 
-senti = [cgi.escape(s) for s in form.getlist("senti[]")]
+senti = [cgi.escape(s) for s in form.getlist('senti[]')]
 if 'mlsenticon' in senti and 'sentiwn' in senti:
     senti = 'comp' # then it will compile both sentiment scores
 
-concept = cgi.escape(form.getfirst('concept','')) # receives a synset
-ph_concept = concept if concept != None else ""
-clemma = cgi.escape(form.getfirst('clemma','')) # receives a lemmatized concept 
-ph_clemma = clemma if clemma != None else ""
-word = cgi.escape(form.getfirst('word','')) # receives a surface form
-ph_word = word if word != None else ""
-lemma = cgi.escape(form.getfirst('lemma','')) # receives a lemmatized word
-ph_lemma = lemma if lemma != None else ""
-limit = cgi.escape(form.getfirst("limit", "10")) # limit number os sentences to show
+concept = cgi.escape(form.getfirst('concept', '')) # receives a synset
+ph_concept = concept or ''
+clemma = cgi.escape(form.getfirst('clemma', '')) # receives a lemmatized concept 
+ph_clemma = clemma or ''
+word = cgi.escape(form.getfirst('word', '')) # receives a surface form
+ph_word = word or ''
+lemma = cgi.escape(form.getfirst('lemma', '')) # receives a lemmatized word
+ph_lemma = lemma or ''
+limit = cgi.escape(form.getfirst('limit', '10')) # limit number os sentences to show
 
-
-sentlike = cgi.escape(form.getfirst('sentlike','')) # try to match pattern to sentence
-ph_sentlike = sentlike if sentlike != None else ""
+sentlike = cgi.escape(form.getfirst('sentlike', '')) # try to match pattern to sentence (glob pattern)
+ph_sentlike = sentlike or ''
 
 
 
 #########################################
 # SIDS FROM TO
-sid_from = cgi.escape(form.getfirst("sid_from", '0'))
+sid_from = 0
+sid_to = 1000000
 try:
-    sid_from = int(sid_from)
+    sid_from = int(cgi.escape(form.getfirst('sid_from', 0)))
 except:
-    sid_from = 0
-sid_to = cgi.escape(form.getfirst("sid_to", '1000000'))
+    pass
 try:
-    sid_to = int(sid_to)
+    sid_to = int(cgi.escape(form.getfirst('sid_to', 1000000)))
 except:
-    sid_to = 1000000
+    pass
 ##########################################
 
 # pos_eng = form.getlist("selectpos-eng")
@@ -99,18 +111,12 @@ except:
 # pos_jpn = form.getlist("selectpos-jpn")
 # pos_ind = form.getlist("selectpos-ind")
 # pos_ita = form.getlist("selectpos-ita")
-pos_eng = [cgi.escape(pos) for pos in form.getlist("selectpos-eng")]
-pos_cmn = [cgi.escape(pos) for pos in form.getlist("selectpos-cmn")]
-pos_jpn = [cgi.escape(pos) for pos in form.getlist("selectpos-jpn")]
-pos_ind = [cgi.escape(pos) for pos in form.getlist("selectpos-ind")]
-pos_ita = [cgi.escape(pos) for pos in form.getlist("selectpos-ita")]
 
-pos_form = dd(lambda: list())
-pos_form['eng'] = pos_eng
-pos_form['cmn'] = pos_cmn
-pos_form['jpn'] = pos_jpn
-pos_form['ind'] = pos_ind
-pos_form['ita'] = pos_ita
+pos_form = dict()
+for lang in 'eng cmn jpn ind ita'.split():
+    formkey = f'selectpos-{lang}'
+    pos_form[lang] = [cgi.escape(pos) for pos in form.getlist(formkey)]
+
 
 # corpuslangs = ['eng', 'cmn', 'jpn', 'ind'] # THIS SHOULD GO TO DATA.py
 corpusdb = "../db/%s.db" % searchlang
@@ -130,194 +136,218 @@ selfcgi = "showcorpus.cgi"
 wndb = "../db/wn-ntumc.db"
 
 ### reference to wn-grid (search .cgi)
-wncgi_lemma = "wn-gridx.cgi?gridmode=ntumc-noedit&lang=%s&lemma=" % searchlang
-wncgi_ss = "wn-gridx.cgi?gridmode=ntumc-noedit&lang=%s&synset=" % searchlang
+URL_WNCGI_LEMMA = "wn-gridx.cgi?gridmode=ntumc-noedit&lang=%s&lemma=" % searchlang
+URL_WNCGI_SS = "wn-gridx.cgi?gridmode=ntumc-noedit&lang=%s&synset=" % searchlang
 
 
 #############################
 # SQLITE Query Preparation
 #############################
-searchquery = ""
+searchquery = ""  # Human-friendly representation of query params
 # searchquery += "(Language:%s)+" % searchlang
 
+"""(Wilson)
+Each _q var is a tuple of (sql_condition, value). 
+searchquery is basically a human-friendly representation of the *_q vars.
 
+We can unify these in a single struct with a QueryConstraint namedtuple with the
+following fields:
+  sql (str) - a constituent of the SQL WHERE clause
+  value (list) - a list of values to be extended into the single list of args
+                 passed into cursor.execute()
+  hf (str) - Human-friendly representation of the constraint, usually formatted
+             like "(Constraint-Name:value)"
+"""
+QueryConstraint = namedtuple('QueryConstraint', 'sql, value, hf')
+UNCONSTRAINED = QueryConstraint(sql='', value=[], hf='')
 
+### Init query params to null
+# The generator compre yields tuples into the OrderedDict to ensure consistent 
+# ordering for the human-friendly printout. As of Python 3.7 dict keys iterate 
+# in order of insertion, but explicit is better than implicit.
+CONSTRAINT_KEYS = [
+    'sentlike', 'concept', 'clemma', 'word', 'lemma',  # simple AND =/GLOB
+    'pos',  # pos IN ('spam', 'eggs', 'ham')
+    'sid_from', 'sid_from2', 'sid_to', 'sid_to2',  # <= or >=
+    'limit',  # LIMIT foo
+]
+query_constraints = OrderedDict((key, UNCONSTRAINED) for key in CONSTRAINT_KEYS)
+
+### Parse form data into constraints in the query
 if sentlike:
-    searchquery += "(Sentence-Like:%s)+" % sentlike
-    # sentlike_q = """ AND sent.sent GLOB '*%s*' """ % sentlike
-    sentlike_q = (""" AND sent.sent GLOB ? """, [sentlike])
-else:
-    sentlike_q = ('', False)
+    query_constraints['sentlike'] = QueryConstraint(""" AND sent.sent GLOB ? """,
+                                                    [sentlike],
+                                                    f'(Sentence-Like:{sentlike})')
 
 if concept:
-    searchquery += "(Concept:%s)+" % concept
-    # concept_q = " AND tag='%s' " % concept
-    concept_q = (" AND tag = ? ", [concept])
-else:
-    concept_q = ('', False)
+    query_constraints['concept'] = QueryConstraint(""" AND tag = ? """,
+                                                   [concept],
+                                                   f'(Concept:{concept})')
 
 if clemma:
-    searchquery += "(C-Lemma:%s)+" % clemma
-    # clemma_q = """ AND clemma GLOB '%s' """ % clemma
-    clemma_q = (" AND clemma GLOB ? ", [clemma])
-else:
-    clemma_q = ('', False)
+    query_constraints['clemma'] = QueryConstraint(""" AND clemma GLOB ? """,
+                                                  [clemma],
+                                                  f'(C-Lemma:{clemma})')
 
 if word:
-    searchquery += "(Word:%s)+" % word
-    # word_q = """ AND word GLOB '%s' """ % word
-    word_q = (" AND word GLOB ? ", [word])
-else:
-    word_q = ('', False)
+    query_constraints['word'] = QueryConstraint(""" AND word GLOB ? """,
+                                                [word],
+                                                f'(Word:{word})')
 
 if lemma:
-    searchquery += "(Lemma:%s)+" % lemma
-    # lemma_q = """ AND lemma GLOB '%s' """ % lemma
-    lemma_q = (" AND lemma GLOB ? ", [lemma])
-else:
-    lemma_q =  ('', False)
+    query_constraints['lemma'] = QueryConstraint(""" AND lemma GLOB ? """,
+                                                 [lemma],
+                                                 f'(Lemma:{lemma})')
 
 if len(pos_form[searchlang]) > 0:
-    searchquery += "(POS:%s)+" % (" or ".join("'%s'" % s for s in pos_form[searchlang]),)
-    # pos_t  = ",".join("'%s'" % s for s in pos_form[searchlang])
-    # pos_q = """ AND pos in (%s) """ % pos_t
-    pos_t  = ",".join("?" for s in pos_form[searchlang])
-    pos_q = (" AND pos in (%s) " % pos_t, pos_form[searchlang])
-else:
-    pos_q =  ('', False)
+    pos_of_lang = pos_form[searchlang]
+
+    quesmarks = placeholders_for(pos_of_lang)
+    humanfriendly = ' or '.join(f"'{x}'" for x in pos_of_lang)
+
+    query_constraints['pos'] = QueryConstraint(f""" AND pos in ({quesmarks}) """,
+                                               pos_of_lang,
+                                               f'(POS:{humanfriendly})')
 
 if sid_from != 0:
-    searchquery += "(SID>=%s)+" % sid_from
-    # sid_from_q = " AND sent.sid >= %s " % sid_from
-    # sid_from_q2 = " AND sid >= %s " % sid_from
-    sid_from_q = (" AND sent.sid >= %s ", [sid_from])
-    sid_from_q2 = (" AND sid >= %s ", [sid_from])
-else:
-    sid_from_q =  ('', False)
-    sid_from_q2 =  ('', False)
+    query_constraints['sid_from'] = QueryConstraint(f""" AND sent.sid >= ? """,
+                                                    sid_from,
+                                                    f'(SID>={sid_from})')
+    query_constraints['sid_from2'] = QueryConstraint(f""" AND sid >= ? """,
+                                                     sid_from,
+                                                     hf=None)
 
 if sid_to != 1000000:
-    searchquery += "(SID<=%s)+" % sid_to
-    # sid_to_q = " AND sent.sid <= %s " % sid_to
-    # sid_to_q2 = " AND sid <= %s " % sid_to
-    sid_to_q = (" AND sent.sid <= ? ", [sid_to])
-    sid_to_q2 = (" AND sid <= ? ", [sid_to])
-else:
-    sid_to_q =  ('', False)
-    sid_to_q2 =  ('', False)
+    query_constraints['sid_to'] = QueryConstraint(f""" AND sent.sid <= ? """,
+                                                  sid_to,
+                                                  f'(SID<={sid_to})')
+    query_constraints['sid_to2'] = QueryConstraint(f""" AND sid <= ? """,
+                                                   sid_to,
+                                                   hf=None)
 
 release_match_style = False
-if limit == "all":
-    limit_q =  ('', False)
-elif (sid_from != 0 or sid_to != 1000000) and (concept_q == "" and 
-    clemma_q == "" and word_q == "" and lemma_q == "" and pos_q == ""):
-    limit_q = (" LIMIT ? ", [5000]) #HARD CODED LIMIT 500 words
-    release_match_style = True
+if limit == 'all':
+    # Limit explicitly uncapped
+    query_constraints['limit'] = UNCONSTRAINED
+
 else:
-    limit_q = (" LIMIT ? ", [limit])
+    sid_constraints = sid_from != 0 or sid_to != 1000000
+    other_constraints = [query_constraints[key] != UNCONSTRAINED
+                         for key in 'concept  clemma  word  lemma  pos'.split()]
 
-
+    
+    # If only constrained by sentenceIDs, cap the 'window size'
+    if sid_constraints and not any(other_constraints):
+        query_constraints['limit'] = QueryConstraint(f""" LIMIT ? """,
+                                                     [5000],  # HARD CODED LIMIT 500 words
+                                                     None)
+        release_match_style = True
+    
+    # Otherwise cap by the given limit
+    else:
+        query_constraints['limit'] = QueryConstraint(f""" LIMIT ? """,
+                                                    [limit],
+                                                    None)
     
 if mode == "wordview":
     # errlog.write("It entered wordview mode!<br>")
-    
-    # sss = ",".join("'%s'" % s for s in wordtag)
-    sss = (",".join("?" for s in wordtag),wordtag)
 
     ###########################
     # Connect to wordnet.db
     ###########################
     con = sqlite3.connect(wndb)
     wn = con.cursor()
+    
     fetch_ss_name_def = """
-    SELECT s.synset, name, src, lang, def, sid
-    FROM (SELECT synset, name, src
-          FROM synset
-          WHERE synset in (%s)) s
-    LEFT JOIN synset_def
-    WHERE synset_def.synset = s.synset
-    AND synset_def.lang in (?,'eng')
-    """ % (sss[0])
-    wn.execute(fetch_ss_name_def, sss[1]+[searchlang])
+        SELECT s.synset, name, src, lang, def, sid
+        FROM (SELECT synset, name, src
+              FROM synset
+              WHERE synset in ({quesmarks})) s
+        LEFT JOIN synset_def
+        WHERE synset_def.synset = s.synset
+        AND synset_def.lang in (?, 'eng')
+    """.format(quesmarks=placeholders_for(wordtag))
+    
+    wn.execute(fetch_ss_name_def, wordtag + [searchlang])
     rows = wn.fetchall()
-    ss_defs = dd(lambda: dd(lambda:  dd(lambda: str())))
-    ss_names = dd(lambda: dd(lambda:list()))
-    for r in rows:
-        (synset, name, src,
-         lang, ss_def, sid) = (r[0], r[1], r[2],
-                               r[3], r[4], r[5])
+    
+    ss_defs = dd(lambda: dd(lambda: dd(str)))
+    ss_names = dd(lambda: dd(list))
+    for synset, name, src, lang, ss_def, sid in rows:
         ss_names[synset] = [name, src]
         ss_defs[synset][lang][sid] = ss_def
+    
     try:
-        html_word = cgi.escape(word.decode("utf8"), quote=True)
+        html_word = cgi.escape(word, quote=True)
     except:
         html_word = '' # The forms fails to read ; as the argument for word!
     try:
-        html_lemma = cgi.escape(lemma.decode("utf8"), quote=True)
+        html_lemma = cgi.escape(lemma, quote=True)
     except:
         html_lemma = '' # The forms fails to read ; as the argument for lemma!
-    html_pos = cgi.escape(postag.decode("utf8"), quote=True)
+    html_pos = cgi.escape(postag, quote=True)
 
-    lemma_href = """<a class='fancybox fancybox.iframe' 
-                    href='%s%s'>%s</a>
-                      """ % (wncgi_lemma, html_lemma, html_lemma)
-    postag_def = """<span title='%s'>%s</span>""" % (pos_tags[searchlang][postag]['eng_def'], 
-                        pos_tags[searchlang][postag]['def'])
+    html_lemma_href = """<a class="fancybox fancybox.iframe" 
+                          href="{endpoint}{arg}">{lemma}</a>
+                      """.format(endpoint=URL_WNCGI_LEMMA,
+                                 arg=html_lemma,
+                                 lemma=html_lemma)
+    
+    html_postag_def = """<span title="{engdef}">{langdef}</span>
+                      """.format(engdef=pos_tags[searchlang][postag]['eng_def'], 
+                                 langdef=pos_tags[searchlang][postag]['def'])
 
-    print(u"""Content-type: text/html; charset=utf-8\n
-         <!DOCTYPE html>
-         <html>
-           <head>
-             <meta http-equiv='Content-Type' content='text/html; charset=utf-8'>
-             <link href="../tag-wn.css" rel="stylesheet" type="text/css">
-             <script src="../tag-wn.js" language="javascript"></script>
-             <!-- KICKSTART -->
-             <script src="../HTML-KickStart-master/js/kickstart.js"></script> 
-             <link rel="stylesheet" media="all"
-               href="../HTML-KickStart-master/css/kickstart.css"/>""")
-    print("""<title>%s</title></head><body>""" % cginame)
-    print("""<h6>Word Details</h6>""")
-    print("""<table>""")
-    print("""<tr><td>Word:</td><td>%s</td></tr>""" % html_word)
-    print("""<tr><td>POS:</td><td>%s (%s)</td></tr>
-          """ % (html_pos, postag_def) )
-    print("""<tr><td>Lemma:</td><td>%s</td></tr>""" % lemma_href)
-    print("""<tr><td>Concept(s):</td><td>""")
-
+    print(f"""Content-type: text/html; charset=utf-8\n
+    <!DOCTYPE html>
+    <html>
+      <head>
+        <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+        <link href="../tag-wn.css" rel="stylesheet" type="text/css">
+        <script src="../tag-wn.js" language="javascript"></script>
+        <!-- KICKSTART -->
+        <script src="../HTML-KickStart-master/js/kickstart.js"></script> 
+        <link rel="stylesheet" media="all"
+              href="../HTML-KickStart-master/css/kickstart.css"/>
+        <title>{cginame}</title></head><body>
+      </head>
+      <body>
+        <h6>Word Details</h6>
+        <table>
+          <tr><td>Word:</td><td>{html_word}</td></tr>
+          <tr><td>POS:</td><td>{html_pos} ({html_postag_def})</td></tr>
+          <tr><td>Lemma:</td><td>{html_lemma_href}</td></tr>
+          <tr><td>Concept(s):</td><td>
+    """)
+    
     for i, tag in enumerate(wordtag):
         tag_defs = ""
-        for defid in ss_defs[tag][searchlang]:
-            tag_defs += ss_defs[tag][searchlang][defid]
-            tag_defs += "; "
-        if  searchlang != 'eng':
-            if tag_defs != "":
-                tag_defs = "<br>"
-            for defid in ss_defs[tag]['eng']:
-                tag_defs += ss_defs[tag]['eng'][defid]
-                tag_defs += "; "
-        if tag_defs == "":
-            tag_defs = "no_definition "
+        tag_defs += '; '.join(ss_defs[tag][searchlang].values())
 
-        tag_defs = tag_defs[:-1] # remove the final space
+        if searchlang != 'eng':
+            if tag_defs:
+                tag_defs += '<br>'
+            tag_defs += '; '.join(ss_defs[tag]['eng'].values())
+
+        if tag_defs == '':
+            tag_defs = 'no_definition'
+        
         try:
-            print("""<a class='fancybox fancybox.iframe' 
-                  href='%s%s'>%s</a> (%s) <br>
-                  """ % (wncgi_ss,tag, wordclemma[i], tag_defs))
+            concept_name = wordclemma[i]
         except:
-            if tag in ['e','None','x','w','loc','org','per','dat','oth']:
-                print("""<a class='fancybox fancybox.iframe' 
-                  href='%s%s'>%s</a> (%s) <br>
-                  """ % (wncgi_ss,tag, tag, tag_defs))
+            if tag in 'e  None  x  w  loc  org  per  dat  oth'.split():
+                concept_name = tag
             else:
-                print("""<a class='fancybox fancybox.iframe' 
-                  href='%s%s'>%s</a> (%s) <br>
-                  """ % (wncgi_ss,tag, ss_names[tag][0], tag_defs))
+                concept_name = ss_names[tag][0]
+        
+        print(f"""
+            <a class='fancybox fancybox.iframe'
+               href='{URL_WNCGI_SS}{tag}'>{concept_name}</a> ({tag_defs})<br/>""")
 
-    print("""</td></tr>""")
-    print("""</table></div>""")
-
-    print("</body>")
-    print("</html>")
+    print("""
+          </td></tr>
+        </table>
+      </body>
+    </html>""")
     sys.exit(0)
 
 
@@ -339,7 +369,7 @@ if corpusdb != "../db/None.db":
     # should not have cwl (because that restricts the 
     # query to ONLY things that have concepts!
     ############################################################
-    if concept_q != ('', False) or clemma_q != ('', False):
+    if concept_q != UNCONSTRAINED or clemma_q != UNCONSTRAINED:
 
         # errlog.write("It entered concept_q nor clemma_q =! EMPTY <br>")
 
@@ -357,20 +387,22 @@ if corpusdb != "../db/None.db":
         #    """.format(concept_q, clemma_q, sid_from_q2, 
         #               sid_to_q2, word_q, lemma_q, pos_q, limit_q)
 
-
-        showcorpus  ="""
-           SELECT cl.sid, cl.cid, cl.tag 
-           FROM (SELECT c.sid, c.cid, wid, tag 
-                 FROM (SELECT sid, cid, tag 
-                       FROM concept WHERE 1 > 0 {} {} {} {} ) c 
-                 LEFT JOIN cwl 
-                 WHERE cwl.sid = c.sid 
-                 AND c.cid = cwl.cid) cl 
-           LEFT JOIN word 
-           WHERE word.sid = cl.sid 
-           AND word.wid = cl.wid {} {} {} {} 
-           """.format(concept_q[0], clemma_q[0], sid_from_q2[0], sid_to_q2[0], word_q[0], lemma_q[0], pos_q[0], limit_q[0])
-
+        showcorpus_keys = """concept  clemma  sid_from  sid_to
+                             word  lemma  pos  limit""".split()
+        showcorpus_wheres = [query_constraints[key].sql
+                             for key in showcorpus_keys]
+        showcorpus = """
+            SELECT cl.sid, cl.cid, cl.tag 
+            FROM (SELECT c.sid, c.cid, wid, tag 
+                  FROM (SELECT sid, cid, tag 
+                        FROM concept WHERE 1 > 0 {} {} {} {} ) c 
+                  LEFT JOIN cwl 
+                  WHERE cwl.sid = c.sid 
+                  AND c.cid = cwl.cid) cl 
+            LEFT JOIN word 
+            WHERE word.sid = cl.sid 
+            AND word.wid = cl.wid {} {} {} {} 
+        """.format(*showcorpus_wheres)
 
         # errlog.write("concept(tag): %s\n" % concept_q)
         # errlog.write("conceptlemma: %s\n" % clemma_q)
@@ -378,38 +410,27 @@ if corpusdb != "../db/None.db":
         # errlog.write("%s <br>" % showcorpus)
         # errlog.flush()
 
+        showcorpus_params = []
+        for key in showcorpus_keys:
+            constr = query_constraints[key]
+            if constr != UNCONSTRAINED:
+                showcorpus_params += constr.value
 
-        params = []
-        for p in (concept_q, clemma_q, sid_from_q2, 
-                  sid_to_q2, word_q, lemma_q, pos_q, limit_q):
-            if p[1]:
-                params = params + p[1]
-
-        # concept_q[1] if concept_q[1] else [] +\
-        # clemma_q[1] if clemma_q[1] else [] +\
-        # sid_from_q2[1] if sid_from_q2[1] else [] +\
-        # sid_to_q2[1] if sid_to_q2[1] else [] +\
-        # word_q[1] if word_q[1] else [] +\
-        # lemma_q[1] if lemma_q[1] else [] +\
-        # pos_q[1] if pos_q[1] else [] +\
-        # limit_q[1] if limit_q[1] else []
-
-        cc.execute(showcorpus, params)
-
+        cc.execute(showcorpus, showcorpus_params)
         rows = cc.fetchall()
 
-        sid_cid = dd(lambda: dd(lambda: str))
-        for r in rows:
-            (sid, cid, tag) = (r[0], r[1], r[2])
+        sid_cid = dd(lambda: dd(list))
+        for sid, cid, tag in rows:
             sid_cid[sid][cid] = [tag]
-        sids = ",".join("'%s'" % s for s in sid_cid.keys())
+        
+        sids = ','.join(f"'{sid}'" for sid in sid_cid.keys())
         # errlog.write("Executed ok and now has a list of sids: <br>")
         # errlog.write(" %s <br>" % str(sids))
 
 
 
-    elif word_q != ('', False) or lemma_q != ('', False) or pos_q != ('', False) \
-         or sid_from_q != ('', False) or sid_to_q != ('', False) or sentlike_q != ('', False):
+    elif any(query_constraints[key] != UNCONSTRAINED
+             for key in 'word  lemma  pos  sid_from  sid_to  sentlike'.split()):
 
         # errlog.write("The search was not related to concepts... <br>")
 
@@ -421,60 +442,55 @@ if corpusdb != "../db/None.db":
         # %s %s %s %s %s %s %s""" % (word_q, lemma_q, pos_q, 
         #                            sid_from_q, sid_to_q, sentlike_q, limit_q)
 
+        showcorpus_keys = """word  lemma  pos  sid_from  sid_to
+                             sentlike  limit""".split()
+        showcorpus_wheres = [query_constraints[key].sql
+                             for key in showcorpus_keys]
         showcorpus = """
-        SELECT word.sid, word.wid
-        FROM word
-        LEFT JOIN sent
-        WHERE word.sid = sent.sid
-        {} {} {} {} {} {} {}""".format(word_q[0], lemma_q[0], pos_q[0], 
-                                       sid_from_q[0], sid_to_q[0], sentlike_q[0], limit_q[0])
-
-
-
+            SELECT word.sid, word.wid
+            FROM word
+            LEFT JOIN sent
+            WHERE word.sid = sent.sid {} {} {} {} {} {} {}
+        """.format(*showcorpus_wheres)
 
         # errlog.write("It will try to run the following query:\n")
-        errlog.write("%s\n" % showcorpus)
+        errlog.write('%s\n' % showcorpus)
 
+        showcorpus_params = []
+        for key in showcorpus_keys:
+            constr = query_constraints[key]
+            if constr != UNCONSTRAINED:
+                showcorpus_params += constr.value
 
-
-        params = []
-        for p in (word_q, lemma_q, pos_q, 
-                  sid_from_q, sid_to_q, sentlike_q, limit_q):
-            if p[1]:
-                params = params + p[1]
-
-        cc.execute(showcorpus, params)
+        cc.execute(showcorpus, showcorpus_params)
 
 
         rows = cc.fetchall()
 
-        sid_cid = dd(lambda: dd(lambda:list()))
-        sid_matched_wid = dd(lambda: list())
-        sid_list = list()
-        for r in rows:
-            sid = r[0]
-            wid = r[1]
-            sid_list.append(sid)
+        sid_cid = dd(lambda: dd(list))
+        sid_matched_wid = dd(list)
+        for sid, wid in rows:
             sid_matched_wid[sid].append(wid)
-        sids = ",".join("'%s'" % s for s in sid_list)
+        sids = ','.join(f"'{sid}'" for sid in sid_matched_wid)
 
     else:
-        sids = ",".join("'%s'" % s for s in [])
+        #(Wilson) What???
+        sids = ','.join("'%s'" % s for s in [])
     #######################################################################
     # THE sids HAS THE SIDS TO BE PRINTED IN AN SQLITE QUERY;  
     # IF CONCEPTS WERE SEARCHED, THEN THE DICT sid_cid HOLDS THAT INFO TOO
     #######################################################################
 
 
-    sid_wid = dd(lambda: dd(lambda:list()))
-    fetch_sent = """
-    SELECT sid, wid, word, lemma, pos
-    FROM word
-    WHERE sid in (%s)""" % sids
+    sid_wid = dd(lambda: dd(list))
+    fetch_sent = f"""
+        SELECT sid, wid, word, lemma, pos
+        FROM word
+        WHERE sid in ({sids})
+    """
     cc.execute(fetch_sent)
     rows = cc.fetchall()
-    for r in rows:
-        (sid, wid, word, lemma, pos) = (r[0], r[1], r[2], r[3], r[4])
+    for sid, wid, word, lemma, pos in rows:
         pos = "unk" if pos == None else pos
         sid_wid[sid][wid] = [word, lemma, pos]
 
@@ -482,34 +498,35 @@ if corpusdb != "../db/None.db":
     # THE DICT sid_wid HAS THE FULL LIST OF SIDS BY WIDS;  
     #######################################################################
 
-    fetch_sent_full_details = """
-    SELECT w.sid, w.wid, w.word, w.lemma, w.pos, cwl.cid
-    FROM (SELECT sid, wid, word, lemma, pos
-          FROM word
-          WHERE sid in (%s) ) w
-    LEFT JOIN cwl
-    WHERE w.wid = cwl.wid
-    AND w.sid = cwl.sid
-    ORDER BY w.sid""" % sids
+    fetch_sent_full_details = f"""
+        SELECT w.sid, w.wid, w.word, w.lemma, w.pos, cwl.cid
+        FROM (SELECT sid, wid, word, lemma, pos
+              FROM word
+              WHERE sid in ({sids}) ) w
+        LEFT JOIN cwl
+        WHERE w.wid = cwl.wid
+        AND w.sid = cwl.sid
+        ORDER BY w.sid
+    """
 
-    fetch_concept_details = """
-    SELECT sid, cid, clemma, tag 
-    FROM concept
-    WHERE sid in (%s)
-    ORDER BY sid""" % sids
+    fetch_concept_details = f"""
+        SELECT sid, cid, clemma, tag 
+        FROM concept
+        WHERE sid in ({sids})
+        ORDER BY sid
+    """
 
-    sid_cid_wid = dd(lambda: dd(lambda: list()))
-    sid_wid_cid = dd(lambda: dd(lambda: list()))
-    sid_wid_tag = dd(lambda: dd(lambda: list()))
-    sid_cid_tag = dd(lambda: dd(lambda: str))
-    sid_cid_clemma = dd(lambda: dd(lambda: str))
+    sid_cid_wid = dd(lambda: dd(list))
+    sid_wid_cid = dd(lambda: dd(list))
+    sid_wid_tag = dd(lambda: dd(list))
+    sid_cid_tag = dd(lambda: dd(str))
+    sid_cid_clemma = dd(lambda: dd(str))
 
     sss = set() # holds the list of all tags (for sentiment)
 
     cc2.execute(fetch_concept_details)
     rows2 = cc2.fetchall()
-    for r in rows2:
-        (sid, cid, clemma, tag) = (r[0], r[1], r[2], r[3]) 
+    for sid, cid, clemma, tag in rows2:
         sid_cid_tag[sid][cid] = tag
         sid_cid_clemma[sid][cid] = clemma
         sss.add(tag)
@@ -517,11 +534,7 @@ if corpusdb != "../db/None.db":
     cc.execute(fetch_sent_full_details)
     rows = cc.fetchall()
 
-    for r in rows:
-        (sid, wid, word, 
-         lemma, pos, cid) = (r[0], r[1], r[2], 
-                             r[3], r[4], r[5])
-
+    for sid, wid, word, lemma, pos, cid in rows:
         # TRY TO USE ONLY THE SECOND DICT
         # (IS IT COMPATIBLE WITH BOTH CASES?) 
         sid_cid_wid[sid][cid].append(wid)  # THIS IS TO COLOR EVERY WID IN CID
@@ -543,57 +556,53 @@ if corpusdb != "../db/None.db":
         # links[lang][fsid] = set(tsid)
         links = dd(lambda: dd(set)) # this holds the sid links between langs
         # l_sid_fullsent = {lang2: {sid: full_sentence} }
-        l_sid_fullsent = dd(lambda: dd(lambda: ""))
+        l_sid_fullsent = dd(lambda: dd(str))
 
-        l_sid_wid = dd(lambda: dd(lambda: dd(lambda:list())))
-        l_sid_cid_wid = dd(lambda: dd(lambda: dd(lambda: list())))
-        l_sid_wid_cid = dd(lambda: dd(lambda: dd(lambda: list())))
-        l_sid_wid_tag = dd(lambda: dd(lambda: dd(lambda: list())))
+        l_sid_wid = dd(lambda: dd(lambda: dd(list)))
+        l_sid_cid_wid = dd(lambda: dd(lambda: dd(list)))
+        l_sid_wid_cid = dd(lambda: dd(lambda: dd(list)))
+        l_sid_wid_tag = dd(lambda: dd(lambda: dd(list)))
         
-        l_sid_cid_tag = dd(lambda: dd(lambda: dd(lambda: str)))
-        l_sid_cid_clemma = dd(lambda: dd(lambda: dd(lambda: str)))
+        l_sid_cid_tag = dd(lambda: dd(lambda: dd(str)))
+        l_sid_cid_clemma = dd(lambda: dd(lambda: dd(str)))
 
         errlog.write("There were langs2: %s \n" % ' | '.join(langs2)) #LOG
 
         # try to find a link database between searchlang and lang2
         for lang2 in langs2:
             lang2_sids = set()
-            if os.path.isfile("../db/%s-%s.db" % (searchlang, lang2)):
+            # FIXME(Wilson): Check for whitelist values instead of giving user
+            #   control over which filename to connect
+            dbfile = "../db/%s-%s.db" % (searchlang, lang2)
+            revlink = 0
 
-                # Links will always come from "searchlang" to "lang2"
-                # links[lang][fsid] = set(tsid)
-                # fsid should be in searchlang
-                # for example links[10001] = (10002,10003)
-                linkdb = "../db/%s-%s.db" % (searchlang, lang2)
-                errlog.write("Found lang1-lang2: %s \n" % linkdb) #LOG
-                lcon = sqlite3.connect("%s" % linkdb)
-                lc = lcon.cursor()
-                query="""SELECT fsid, tsid 
-                         FROM slink 
-                         WHERE fsid in (%s)""" % sids
-                lc.execute(query)
-                for (fsid, tsid) in lc:
-                    links[lang2][int(fsid)].add(int(tsid))
-                    lang2_sids.add(tsid) # this is a list of sids in the target langauge to fetch details
+            if not os.path.isfile(dbfile):
+                revdbfile = "../db/%s-%s.db" % (lang2, searchlang)
+                if os.path.isfile(revdbfile):
+                    dbfile = revdbfile
+                    revlink = 1
 
-            elif os.path.isfile("../db/%s-%s.db" % (lang2, searchlang)):
+            errlog.write("Found {}: {} \n".format(
+                ['lang1-lang2', 'lang2-lang1'][revlink],
+                linkdb)) #LOG
 
-                linkdb = "../db/%s-%s.db" % (lang2, searchlang)
-                errlog.write("Found lang2-lang1: %s \n" % linkdb) #LOG
-                lcon = sqlite3.connect("%s" % linkdb)
-                lc = lcon.cursor()
-                query="""SELECT fsid, tsid 
-                         FROM slink  
-                         WHERE tsid in (%s)""" % sids
-                lc.execute(query)
-                for (fsid, tsid) in lc:
-                    links[lang2][int(tsid)].add(int(fsid))
-                    lang2_sids.add(fsid)
+            lcon = sqlite3.connect("%s" % linkdb)
+            lc = lcon.cursor()
+            query = """SELECT fsid, tsid 
+                       FROM slink 
+                       WHERE {} in ({})""".format(['fsid', 'tsid'][revlink],
+                                                  sids)
+            lc.execute(query)
+            
+            for (fsid, tsid) in lc:
+                if revlink:
+                    fsid, tsid = tsid, fsid
+                links[lang2][int(fsid)].add(int(tsid))
+                lang2_sids.add(tsid) # this is a set of sids in the target langauge to fetch details
 
-
-            lang2_sids = ",".join("'%s'" % s for s in lang2_sids)
-            errlog.write("Fetched sids: %s \n" % lang2_sids) #LOG
-            errlog.write("links_dict: %s \n" % '|'.join(links.keys())) #LOG
+            lang2_sids = ','.join(f"'{s}'" for s in lang2_sids)
+            errlog.write('Fetched sids: %s \n' % lang2_sids) #LOG
+            errlog.write('links_dict: %s \n' % '|'.join(links.keys())) #LOG
 
 
             ##############################################
@@ -610,50 +619,47 @@ if corpusdb != "../db/None.db":
             # STORE THE FULL SENTENCE, IN CASE THE LANG2 DOES NOT 
             # HAVE WORDS TO PRODUCE THE SENTENCE FROM...
             fetch_fullsent = """
-            SELECT sid, sent.sent
-            FROM sent
-            WHERE sid in (%s)""" % lang2_sids
+                SELECT sid, sent.sent
+                FROM sent
+                WHERE sid in (%s)""" % lang2_sids
             cc.execute(fetch_fullsent)
             rows = cc.fetchall()
-            for r in rows:
-                (s, fullsent) = (r[0], r[1])
+            for s, fullsent in rows:
                 l_sid_fullsent[lang2][s] = fullsent
             ######################################################
 
 
             fetch_sent = """
-            SELECT sid, wid, word, lemma, pos
-            FROM word
-            WHERE sid in (%s)""" % lang2_sids
+                SELECT sid, wid, word, lemma, pos
+                FROM word
+                WHERE sid in (%s)""" % lang2_sids
             cc.execute(fetch_sent)
             rows = cc.fetchall()
-            for r in rows:
-                (sid, wid, word, lemma, pos) = (r[0], r[1], r[2], r[3], r[4])
+            for sid, wid, word, lemma, pos in rows:
                 pos = "unk" if pos == None else pos
                 l_sid_wid[lang2][sid][wid] = [word, lemma, pos]
 
 
             fetch_sent_full_details = """
-            SELECT w.sid, w.wid, w.word, w.lemma, w.pos, cwl.cid
-            FROM (SELECT sid, wid, word, lemma, pos
-                  FROM word
-                  WHERE sid in (%s) ) w
-            LEFT JOIN cwl
-            WHERE w.wid = cwl.wid
-            AND w.sid = cwl.sid
-            ORDER BY w.sid""" % lang2_sids
+                SELECT w.sid, w.wid, w.word, w.lemma, w.pos, cwl.cid
+                FROM (SELECT sid, wid, word, lemma, pos
+                      FROM word
+                      WHERE sid in (%s) ) w
+                LEFT JOIN cwl
+                WHERE w.wid = cwl.wid
+                AND w.sid = cwl.sid
+                ORDER BY w.sid""" % lang2_sids
 
             fetch_concept_details = """
-            SELECT sid, cid, clemma, tag 
-            FROM concept
-            WHERE sid in (%s)
-            ORDER BY sid""" % lang2_sids
+                SELECT sid, cid, clemma, tag 
+                FROM concept
+                WHERE sid in (%s)
+                ORDER BY sid""" % lang2_sids
 
 
             cc2.execute(fetch_concept_details)
             rows2 = cc2.fetchall()
-            for r in rows2:
-                (sid, cid, clemma, tag) = (r[0], r[1], r[2], r[3]) 
+            for sid, cid, clemma, tag in rows2:
                 l_sid_cid_tag[lang2][sid][cid] = tag
                 l_sid_cid_clemma[lang2][sid][cid] = clemma
                 sss.add(tag) # add also synsets for other languages
@@ -661,11 +667,7 @@ if corpusdb != "../db/None.db":
             cc.execute(fetch_sent_full_details)
             rows = cc.fetchall()
 
-            for r in rows:
-                (sid, wid, word, 
-                 lemma, pos, cid) = (r[0], r[1], r[2], 
-                                     r[3], r[4], r[5])
- 
+            for sid, wid, word, lemma, pos, cid in rows:
                 l_sid_cid_wid[lang2][sid][cid].append(wid)
                 l_sid_wid_cid[lang2][sid][wid].append(cid)
                 l_sid_wid_tag[lang2][sid][wid].append(l_sid_cid_tag[lang2][sid][cid])
@@ -684,29 +686,29 @@ if corpusdb != "../db/None.db":
         ###########################
         con = sqlite3.connect(wndb)
         wn = con.cursor()
+        #(Wilson) I think misc is the reliability score
         ss_resource_sentiment = """
-        SELECT synset, resource, xref, misc
-        FROM xlink
-        WHERE resource in ('MLSentiCon','SentiWN')
-        AND synset in (%s)
+            SELECT synset, resource, xref, misc
+            FROM xlink
+            WHERE resource in ('MLSentiCon','SentiWN')
+            AND synset in (%s)
         """ % (sss)
         
         wn.execute(ss_resource_sentiment)
         rows = wn.fetchall()
 
-        for r in rows:
-            (synset, resource, xref, misc) = (r[0], r[1], r[2], r[3])
+        for synset, resource, xref, misc in rows:
             ss_resource_sent[synset][resource][xref] = float(misc)
                 
 
 else:
-    sid_cid = dd(lambda: dd(lambda:list()))
-    sid_wid = dd(lambda: dd(lambda:list()))
-    sid_cid_wid = dd(lambda: dd(lambda: list()))
-    sid_wid_cid = dd(lambda: dd(lambda: list()))
-    sid_cid_tag = dd(lambda: dd(lambda: str))
-    sid_cid_clemma = dd(lambda: dd(lambda: str))
-    sid_matched_wid = dd(lambda: list())
+    sid_cid = dd(lambda: dd(list))
+    sid_wid = dd(lambda: dd(list))
+    sid_cid_wid = dd(lambda: dd(list))
+    sid_wid_cid = dd(lambda: dd(list))
+    sid_cid_tag = dd(lambda: dd(str))
+    sid_cid_clemma = dd(lambda: dd(str))
+    sid_matched_wid = dd(list)
 
 
 ################################################################
@@ -726,11 +728,11 @@ else:
 ################################################################
 
 ### Header
-print(u"""Content-type: text/html; charset=utf-8\n
+print("""Content-type: text/html; charset=utf-8\n
 <!DOCTYPE html>
 <html>
   <head>
-    <meta http-equiv='Content-Type' content='text/html; charset=utf-8'>
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
     <link href="../tag-wn.css" rel="stylesheet" type="text/css">
     <script src="../tag-wn.js" language="javascript"></script>
 
@@ -739,10 +741,10 @@ print(u"""Content-type: text/html; charset=utf-8\n
     <script src="//code.jquery.com/jquery-1.10.2.js"></script>
     <script src="//code.jquery.com/ui/1.11.2/jquery-ui.js"></script>
     <script>
-    $(function() {
-      $( "#datefrom" ).datepicker();
-      $( "#dateto" ).datepicker();
-    });
+        $(function() {
+          $( "#datefrom" ).datepicker();
+          $( "#dateto" ).datepicker();
+        });
     </script>
 
     <!-- FANCYBOX -->
@@ -770,29 +772,35 @@ print(u"""Content-type: text/html; charset=utf-8\n
         $('#selectpos').multipleSelect();
     </script> """),
 
-print """ \n <!-- TO SHOW POS DIVS IN A SELECT LANG OPTIONS-->
-    <script>
-    $(document).ready(function () {
-      $('.defaulthide').hide();
-      $('#pos-%s').show();
-      $('#corpuslang').change(function () {
-        $('.defaulthide').hide();
-        $('#pos-'+$(this).val()).show();
-      })
-    });
-    </script>""" % searchlang
+# FIXME(Wilson): Definitely constrain searchlang! Allowing user input inside a
+#   <script> tag is terrifying!
+#   For now I will sanitize by removing non-alphanumeric characters
+searchlang = ''.join(c for c in searchlang if c.isalnum())
 
-print(u"""<!-- TO SHOW / HIDE BY ID (FOR DIV)-->
+print(""" \n <!-- TO SHOW POS DIVS IN A SELECT LANG OPTIONS-->
+    <script>
+        $(document).ready(function () {
+          $('.defaulthide').hide();
+          $('#pos-%s').show();
+          $('#corpuslang').change(function () {
+            $('.defaulthide').hide();
+            $('#pos-'+$(this).val()).show();
+          })
+        });
+    </script>""" % searchlang)
+
+print("""<!-- TO SHOW / HIDE BY ID (FOR DIV)-->
     <script type="text/javascript">
-     function toggle_visibility(id) {
-         var e = document.getElementById(id);
-         if(e.style.display == 'block')
-            e.style.display = 'none';
-            e.style.visibility = 'collapse';
-         else
-            e.style.display = 'block';
-            e.style.visibility = 'visible';
-     }
+        function toggle_visibility(id) {
+            var e = document.getElementById(id);
+            if (e.style.display == 'block') {
+               e.style.display = 'none';
+               e.style.visibility = 'collapse';
+            } else {
+               e.style.display = 'block';
+               e.style.visibility = 'visible';
+           }
+        }
     </script>
 
 
@@ -803,244 +811,245 @@ print(u"""<!-- TO SHOW / HIDE BY ID (FOR DIV)-->
 
 
     <style>
-    mark { 
-        background-color: #FFA6A6;
-    }
+        mark { 
+            background-color: #FFA6A6;
+        }
+        </style>
+        <style>
+          hr {
+            padding: 0px;
+            margin: 10px;    
+          }
     </style>
+
+
+    <!-- THIS IS A TRY OUT FOR A COOL CSS TOOLTIP! MUST USE class="tooltip-bottom" data-tooltip="I'm the tooltip data!" -->
     <style>
-      hr{
-        padding: 0px;
-        margin: 10px;    
-      }
+        /**
+         * Tooltips!
+         */
+
+        /* Base styles for the element that has a tooltip */
+        [data-tooltip],
+        .tooltip {
+          position: relative;
+          cursor: pointer;
+        }
+
+        /* Base styles for the entire tooltip */
+        [data-tooltip]:before,
+        [data-tooltip]:after,
+        .tooltip:before,
+        .tooltip:after {
+          position: absolute;
+          visibility: hidden;
+          -ms-filter: "progid:DXImageTransform.Microsoft.Alpha(Opacity=0)";
+          filter: progid:DXImageTransform.Microsoft.Alpha(Opacity=0);
+          opacity: 0;
+          -webkit-transition: 
+        	  opacity 0.2s ease-in-out,
+        		visibility 0.2s ease-in-out,
+        		-webkit-transform 0.2s cubic-bezier(0.71, 1.7, 0.77, 1.24);
+        	-moz-transition:    
+        		opacity 0.2s ease-in-out,
+        		visibility 0.2s ease-in-out,
+        		-moz-transform 0.2s cubic-bezier(0.71, 1.7, 0.77, 1.24);
+        	transition:         
+        		opacity 0.2s ease-in-out,
+        		visibility 0.2s ease-in-out,
+        		transform 0.2s cubic-bezier(0.71, 1.7, 0.77, 1.24);
+          -webkit-transform: translate3d(0, 0, 0);
+          -moz-transform:    translate3d(0, 0, 0);
+          transform:         translate3d(0, 0, 0);
+          pointer-events: none;
+        }
+
+        /* Show the entire tooltip on hover and focus */
+        [data-tooltip]:hover:before,
+        [data-tooltip]:hover:after,
+        [data-tooltip]:focus:before,
+        [data-tooltip]:focus:after,
+        .tooltip:hover:before,
+        .tooltip:hover:after,
+        .tooltip:focus:before,
+        .tooltip:focus:after {
+          visibility: visible;
+          -ms-filter: "progid:DXImageTransform.Microsoft.Alpha(Opacity=100)";
+          filter: progid:DXImageTransform.Microsoft.Alpha(Opacity=100);
+          opacity: 1;
+        }
+
+        /* Base styles for the tooltip's directional arrow */
+        .tooltip:before,
+        [data-tooltip]:before {
+          z-index: 1001;
+          border: 6px solid transparent;
+          background: transparent;
+          content: "";
+        }
+
+        /* Base styles for the tooltip's content area */
+        .tooltip:after,
+        [data-tooltip]:after {
+          z-index: 1000;
+          padding: 8px;
+          width: 160px;
+          background-color: #000;
+          background-color: hsla(0, 0%, 20%, 0.9);
+          color: #fff;
+          content: attr(data-tooltip);
+          font-size: 13px;
+          line-height: 1.2;
+        }
+
+        /* Directions */
+
+        /* Top (default) */
+        [data-tooltip]:before,
+        [data-tooltip]:after,
+        .tooltip:before,
+        .tooltip:after,
+        .tooltip-top:before,
+        .tooltip-top:after {
+          bottom: 100%;
+          left: 50%;
+        }
+
+        [data-tooltip]:before,
+        .tooltip:before,
+        .tooltip-top:before {
+          margin-left: -6px;
+          margin-bottom: -12px;
+          border-top-color: #000;
+          border-top-color: hsla(0, 0%, 20%, 0.9);
+        }
+
+        /* Horizontally align top/bottom tooltips */
+        [data-tooltip]:after,
+        .tooltip:after,
+        .tooltip-top:after {
+          margin-left: -80px;
+        }
+
+        [data-tooltip]:hover:before,
+        [data-tooltip]:hover:after,
+        [data-tooltip]:focus:before,
+        [data-tooltip]:focus:after,
+        .tooltip:hover:before,
+        .tooltip:hover:after,
+        .tooltip:focus:before,
+        .tooltip:focus:after,
+        .tooltip-top:hover:before,
+        .tooltip-top:hover:after,
+        .tooltip-top:focus:before,
+        .tooltip-top:focus:after {
+          -webkit-transform: translateY(-12px);
+          -moz-transform:    translateY(-12px);
+          transform:         translateY(-12px); 
+        }
+
+        /* Left */
+        .tooltip-left:before,
+        .tooltip-left:after {
+          right: 100%;
+          bottom: 50%;
+          left: auto;
+        }
+
+        .tooltip-left:before {
+          margin-left: 0;
+          margin-right: -12px;
+          margin-bottom: 0;
+          border-top-color: transparent;
+          border-left-color: #000;
+          border-left-color: hsla(0, 0%, 20%, 0.9);
+        }
+
+        .tooltip-left:hover:before,
+        .tooltip-left:hover:after,
+        .tooltip-left:focus:before,
+        .tooltip-left:focus:after {
+          -webkit-transform: translateX(-12px);
+          -moz-transform:    translateX(-12px);
+          transform:         translateX(-12px); 
+        }
+
+        /* Bottom */
+        .tooltip-bottom:before,
+        .tooltip-bottom:after {
+          top: 100%;
+          bottom: auto;
+          left: 50%;
+        }
+
+        .tooltip-bottom:before {
+          margin-top: -12px;
+          margin-bottom: 0;
+          border-top-color: transparent;
+          border-bottom-color: #000;
+          border-bottom-color: hsla(0, 0%, 20%, 0.9);
+        }
+
+        .tooltip-bottom:hover:before,
+        .tooltip-bottom:hover:after,
+        .tooltip-bottom:focus:before,
+        .tooltip-bottom:focus:after {
+          -webkit-transform: translateY(12px);
+          -moz-transform:    translateY(12px);
+          transform:         translateY(12px); 
+        }
+
+        /* Right */
+        .tooltip-right:before,
+        .tooltip-right:after {
+          bottom: 50%;
+          left: 100%;
+        }
+
+        .tooltip-right:before {
+          margin-bottom: 0;
+          margin-left: -12px;
+          border-top-color: transparent;
+          border-right-color: #000;
+          border-right-color: hsla(0, 0%, 20%, 0.9);
+        }
+
+        .tooltip-right:hover:before,
+        .tooltip-right:hover:after,
+        .tooltip-right:focus:before,
+        .tooltip-right:focus:after {
+          -webkit-transform: translateX(12px);
+          -moz-transform:    translateX(12px);
+          transform:         translateX(12px); 
+        }
+
+        /* Move directional arrows down a bit for left/right tooltips */
+        .tooltip-left:before,
+        .tooltip-right:before {
+          top: 3px;
+        }
+
+        /* Vertically center tooltip content for left/right tooltips */
+        .tooltip-left:after,
+        .tooltip-right:after {
+          margin-left: 0;
+          margin-bottom: -16px;
+        }
     </style>
-
-
-    <!-- THIS IS A TRY OUT FOR A COOL CSS TOOLTIP! MUST USE class="tooltip-bottom" data-tooltip="I’m the tooltip data!" -->
-    <style>
-
-/**
- * Tooltips!
- */
-
-/* Base styles for the element that has a tooltip */
-[data-tooltip],
-.tooltip {
-  position: relative;
-  cursor: pointer;
-}
-
-/* Base styles for the entire tooltip */
-[data-tooltip]:before,
-[data-tooltip]:after,
-.tooltip:before,
-.tooltip:after {
-  position: absolute;
-  visibility: hidden;
-  -ms-filter: "progid:DXImageTransform.Microsoft.Alpha(Opacity=0)";
-  filter: progid:DXImageTransform.Microsoft.Alpha(Opacity=0);
-  opacity: 0;
-  -webkit-transition: 
-	  opacity 0.2s ease-in-out,
-		visibility 0.2s ease-in-out,
-		-webkit-transform 0.2s cubic-bezier(0.71, 1.7, 0.77, 1.24);
-	-moz-transition:    
-		opacity 0.2s ease-in-out,
-		visibility 0.2s ease-in-out,
-		-moz-transform 0.2s cubic-bezier(0.71, 1.7, 0.77, 1.24);
-	transition:         
-		opacity 0.2s ease-in-out,
-		visibility 0.2s ease-in-out,
-		transform 0.2s cubic-bezier(0.71, 1.7, 0.77, 1.24);
-  -webkit-transform: translate3d(0, 0, 0);
-  -moz-transform:    translate3d(0, 0, 0);
-  transform:         translate3d(0, 0, 0);
-  pointer-events: none;
-}
-
-/* Show the entire tooltip on hover and focus */
-[data-tooltip]:hover:before,
-[data-tooltip]:hover:after,
-[data-tooltip]:focus:before,
-[data-tooltip]:focus:after,
-.tooltip:hover:before,
-.tooltip:hover:after,
-.tooltip:focus:before,
-.tooltip:focus:after {
-  visibility: visible;
-  -ms-filter: "progid:DXImageTransform.Microsoft.Alpha(Opacity=100)";
-  filter: progid:DXImageTransform.Microsoft.Alpha(Opacity=100);
-  opacity: 1;
-}
-
-/* Base styles for the tooltip's directional arrow */
-.tooltip:before,
-[data-tooltip]:before {
-  z-index: 1001;
-  border: 6px solid transparent;
-  background: transparent;
-  content: "";
-}
-
-/* Base styles for the tooltip's content area */
-.tooltip:after,
-[data-tooltip]:after {
-  z-index: 1000;
-  padding: 8px;
-  width: 160px;
-  background-color: #000;
-  background-color: hsla(0, 0%, 20%, 0.9);
-  color: #fff;
-  content: attr(data-tooltip);
-  font-size: 13px;
-  line-height: 1.2;
-}
-
-/* Directions */
-
-/* Top (default) */
-[data-tooltip]:before,
-[data-tooltip]:after,
-.tooltip:before,
-.tooltip:after,
-.tooltip-top:before,
-.tooltip-top:after {
-  bottom: 100%;
-  left: 50%;
-}
-
-[data-tooltip]:before,
-.tooltip:before,
-.tooltip-top:before {
-  margin-left: -6px;
-  margin-bottom: -12px;
-  border-top-color: #000;
-  border-top-color: hsla(0, 0%, 20%, 0.9);
-}
-
-/* Horizontally align top/bottom tooltips */
-[data-tooltip]:after,
-.tooltip:after,
-.tooltip-top:after {
-  margin-left: -80px;
-}
-
-[data-tooltip]:hover:before,
-[data-tooltip]:hover:after,
-[data-tooltip]:focus:before,
-[data-tooltip]:focus:after,
-.tooltip:hover:before,
-.tooltip:hover:after,
-.tooltip:focus:before,
-.tooltip:focus:after,
-.tooltip-top:hover:before,
-.tooltip-top:hover:after,
-.tooltip-top:focus:before,
-.tooltip-top:focus:after {
-  -webkit-transform: translateY(-12px);
-  -moz-transform:    translateY(-12px);
-  transform:         translateY(-12px); 
-}
-
-/* Left */
-.tooltip-left:before,
-.tooltip-left:after {
-  right: 100%;
-  bottom: 50%;
-  left: auto;
-}
-
-.tooltip-left:before {
-  margin-left: 0;
-  margin-right: -12px;
-  margin-bottom: 0;
-  border-top-color: transparent;
-  border-left-color: #000;
-  border-left-color: hsla(0, 0%, 20%, 0.9);
-}
-
-.tooltip-left:hover:before,
-.tooltip-left:hover:after,
-.tooltip-left:focus:before,
-.tooltip-left:focus:after {
-  -webkit-transform: translateX(-12px);
-  -moz-transform:    translateX(-12px);
-  transform:         translateX(-12px); 
-}
-
-/* Bottom */
-.tooltip-bottom:before,
-.tooltip-bottom:after {
-  top: 100%;
-  bottom: auto;
-  left: 50%;
-}
-
-.tooltip-bottom:before {
-  margin-top: -12px;
-  margin-bottom: 0;
-  border-top-color: transparent;
-  border-bottom-color: #000;
-  border-bottom-color: hsla(0, 0%, 20%, 0.9);
-}
-
-.tooltip-bottom:hover:before,
-.tooltip-bottom:hover:after,
-.tooltip-bottom:focus:before,
-.tooltip-bottom:focus:after {
-  -webkit-transform: translateY(12px);
-  -moz-transform:    translateY(12px);
-  transform:         translateY(12px); 
-}
-
-/* Right */
-.tooltip-right:before,
-.tooltip-right:after {
-  bottom: 50%;
-  left: 100%;
-}
-
-.tooltip-right:before {
-  margin-bottom: 0;
-  margin-left: -12px;
-  border-top-color: transparent;
-  border-right-color: #000;
-  border-right-color: hsla(0, 0%, 20%, 0.9);
-}
-
-.tooltip-right:hover:before,
-.tooltip-right:hover:after,
-.tooltip-right:focus:before,
-.tooltip-right:focus:after {
-  -webkit-transform: translateX(12px);
-  -moz-transform:    translateX(12px);
-  transform:         translateX(12px); 
-}
-
-/* Move directional arrows down a bit for left/right tooltips */
-.tooltip-left:before,
-.tooltip-right:before {
-  top: 3px;
-}
-
-/* Vertically center tooltip content for left/right tooltips */
-.tooltip-left:after,
-.tooltip-right:after {
-  margin-left: 0;
-  margin-bottom: -16px;
-}
-    </style>
-""")
+    """)
 
 if release_match_style:
-    print """ <style> 
-.match{
-  color:black;
-  font-weight: normal;
-  text-decoration:none;
-}
-</style>"""
+    print("""
+    <style> 
+        .match {
+          color: black;
+          font-weight: normal;
+          text-decoration: none;
+        }
+    </style>""")
 
-print("""<title>%s</title>
+print("""
+    <title>%s</title>
  </head>
  <body>
  """ % cginame)
@@ -1072,26 +1081,32 @@ try:
     # print "sids: " + sids + "<br><br><br>" #TEST 
     # print sid_cid #TEST
 
+    searchquery = '+'.join(query_constraints[key].hf
+                       for key in sorted(CONSTRAINT_KEYS)
+                       if query_constraints[key].hf)
+    searchquery = cgi.escape(searchquery)
     if len(sids) == 0:
-        print "<b>Results for: </b>"
+        print('<b>Results for: </b>')
         if searchquery == "":
-            print "No query was made."
+            print('No query was made.')
         else:
-            print searchquery[:-1]
+            print(searchquery)
             
-        print "<br>"
-        print "<b>No results were found!</b>"
+        print('<br>')
+        print('<b>No results were found!</b>')
 
     # ALL THIS SHOULD BE: IF "CONCEPT" OR "C-LEMMA"
     # THEY SHOLD BE FILTERED BY TAG = x OR e
     # HERE WE'RE SHOWING BY EXISTING CONCEPTS
-    elif concept_q != ('', False) or clemma_q != ('', False):
-
+    elif (query_constraints['concept'] != UNCONSTRAINED
+          or query_constraints['clemma'] != UNCONSTRAINED):
+        
         count = 0
-        for sid in sid_cid.keys():
-            count += len(sid_cid[sid])
-        print "<b>%d Results for: </b>" % count
-        print cgi.escape(searchquery[:-1], quote=True)
+        # sid_cid is nested dict of {sid: {cid: [concept_tag ...]}}
+        for sid, cid_dict in sid_cid.items():
+            count += len(cid_dict)
+        print(f'<b>{count} results for: </b>')
+        print(searchquery)
 
         print("""<table class="striped tight">""")
         print("""<thead><tr><th>Sid</th><th>Sentence</th></tr></thead>""")
